@@ -1,1 +1,116 @@
-hi
+name: Build PS1 Project
+on: [push, pull_request]
+
+jobs:
+  build:
+    name: Run build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+    - name: Fetch repo contents
+      # Moved to the VERY TOP so it doesn't delete the cached toolchain!
+      uses: actions/checkout@v4
+
+    - name: Restore toolchain cache
+      id: cache
+      uses: actions/cache/restore@v5
+      with:
+        key: toolchain-selfhealing-v2
+        path: gcc-mipsel-none-elf
+
+    - name: Heal Cache Permissions
+      if: ${{ steps.cache.outputs.cache-hit == 'true' }}
+      run: |
+        echo "Restoring executable permissions to cached binaries..."
+        chmod -R +x gcc-mipsel-none-elf/bin/ || true
+        chmod -R +x gcc-mipsel-none-elf/mipsel-none-elf/bin/ || true
+
+    - name: Fix script permissions
+      run: |
+        chmod +x .github/scripts/*.sh || true
+
+    - name: Install prerequisites
+      run: |
+        sudo apt-get update -y
+        sudo apt-get install -y --no-install-recommends ninja-build mame-tools
+
+    - name: Download mkpsxiso
+      run: |
+        python3 -c "
+        import json, urllib.request
+        req = urllib.request.Request(
+            'https://api.github.com/repos/Lameguy64/mkpsxiso/releases/latest',
+            headers={'User-Agent': 'psx-ci'}
+        )
+        with urllib.request.urlopen(req) as r:
+            data = json.load(r)
+        url = None
+        for asset in data['assets']:
+            name = asset['name'].lower()
+            if ('ubuntu' in name or 'linux' in name) and not name.endswith('.sha256'):
+                url = asset['browser_download_url']
+                break
+        if not url: raise SystemExit('No Linux mkpsxiso release found')
+        urllib.request.urlretrieve(url, 'mkpsxiso-package')
+        "
+        mkdir -p mkpsxiso-bin
+        if file mkpsxiso-package | grep -qi "Debian binary package"; then
+          dpkg -x mkpsxiso-package mkpsxiso-bin
+        elif unzip -o mkpsxiso-package -d mkpsxiso-bin; then
+          :
+        else
+          tar -xf mkpsxiso-package -C mkpsxiso-bin
+        fi
+        MKPSXISO_BIN="$(find mkpsxiso-bin -type f -iname 'mkpsxiso' | head -n 1)"
+        chmod +x "$MKPSXISO_BIN"
+        sudo cp "$MKPSXISO_BIN" /usr/local/bin/mkpsxiso
+
+    - name: Build GCC toolchain
+      if: ${{ steps.cache.outputs.cache-hit != 'true' }}
+      run: |
+        bash .github/scripts/buildToolchain.sh gcc-mipsel-none-elf mipsel-none-elf
+
+    - name: Verify toolchain
+      run: |
+        if [ ! -x gcc-mipsel-none-elf/bin/mipsel-none-elf-gcc ]; then
+          echo "::error::mipsel-none-elf-gcc is missing or not executable."
+          ls -la gcc-mipsel-none-elf/bin 2>&1 || echo "(gcc-mipsel-none-elf/bin does not exist)"
+          exit 1
+        fi
+        gcc-mipsel-none-elf/bin/mipsel-none-elf-gcc --version
+
+    - name: Save toolchain cache
+      if: ${{ steps.cache.outputs.cache-hit != 'true' }}
+      uses: actions/cache/save@v5
+      with:
+        key: toolchain-selfhealing-v2
+        path: gcc-mipsel-none-elf
+
+    - name: Generate Model Data
+      run: |
+        python3 tools/obj_to_c.py assets/model.obj src/model_data.h
+
+    - name: Generate Texture Data
+      run: |
+        pip3 install --quiet pillow
+        python3 tools/png_to_c.py assets/PSOne_ON.png src/texture_data.h MODELTEX
+
+    - name: Generate Font Data
+      run: |
+        python3 tools/png_to_c.py assets/font.png src/font_data.h FONTTEX
+
+    - name: Build project
+      run: |
+        export PATH=$PATH:$(pwd)/gcc-mipsel-none-elf/bin
+        bash .github/scripts/buildRelease.sh
+
+    - name: Upload build artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: ps1-release
+        if-no-files-found: error
+        path: |
+          *.zip
+          build/*.psexe
