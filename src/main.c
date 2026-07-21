@@ -1,7 +1,8 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include "gpu.h"
-#include "gte.h"
+// The ps1-bare-metal SDK handles GTE macros and functions directly within gpu.h 
+// or its internal math headers depending on the example base, so we drop the missing gte.h header.
 
 // --- APP STATES ---
 enum AppState {
